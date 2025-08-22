@@ -47,7 +47,7 @@ def _has(obj, name):
 def _strip_null_repo(label):
     """Removes the null repo name (e.g. @//) from a string.
 
-    The is to make str(label) compatible between bazel 5.x and 6.x
+    This is to make str(label) compatible between bazel 5.x and 6.x
     """
     s = str(label)
     if s.startswith('@//'):
@@ -101,7 +101,7 @@ def _write_metadata_info_impl(target, ctx):
 
     # Write the output file for the target
     name = "%s_metadata_info.json" % ctx.label.name
-    content = "[\n%s\n]\n" % ",\n".join(metadata_info_to_json(info))
+    content = "[\n%s\n]\n" % ",\n".join(metadata_info_to_json(info, _strip_null_repo(target.label)))
     out = ctx.actions.declare_file(name)
     ctx.actions.write(
         output = out,
@@ -168,20 +168,25 @@ def write_metadata_info(ctx, deps, json_out):
     licenses = []
     for dep in deps:
         if TransitiveMetadataInfo in dep:
-            licenses.extend(metadata_info_to_json(dep[TransitiveMetadataInfo]))
+            # BEFORE: licenses.extend(metadata_info_to_json(dep[TransitiveMetadataInfo]))
+            licenses.extend(metadata_info_to_json(
+                dep[TransitiveMetadataInfo],
+                _strip_null_repo(dep.label),   # <-- fallback label
+            ))
         else:
-            # Warn but continue if the aspect didn't attach.
-            print("WARNING: rules_license: No TransitiveMetadataInfo on %s; skipping." % dep)
+            print("WARNING: rules_license: No TransitiveMetadataInfo on %s; skipping."
+                  % _strip_null_repo(dep.label))
     ctx.actions.write(
         output = json_out,
         content = "[\n%s\n]\n" % ",\n".join(licenses),
     )
 
-def metadata_info_to_json(metadata_info):
+def metadata_info_to_json(metadata_info, fallback_top_label = ""):
     """Render a single LicenseInfo provider to JSON
 
     Args:
       metadata_info: A LicenseInfo.
+      fallback_top_label: label string to use in warnings/top_level_target if provider lacks it.
 
     Returns:
       [(str)] list of LicenseInfo values rendered as JSON.
@@ -298,7 +303,9 @@ def metadata_info_to_json(metadata_info):
             ))
 
     # Back-compat / alt source: ExperimentalMetadataInfo bag under other_metadata
+    had_other_metadata = False
     if _has(metadata_info, "other_metadata") and metadata_info.other_metadata != None:
+        had_other_metadata = True
         for mi in sorted(_safe_to_list(metadata_info.other_metadata), key = lambda x: str(getattr(x, "label", ""))):
             # This format is for using distinct providers.  I like the compile time safety.
             if hasattr(mi, "type") and mi.type == "package_info":
@@ -322,13 +329,39 @@ def metadata_info_to_json(metadata_info):
                     package_version = mi.data.get("package_version") or "",
                     purl = mi.data.get("purl") or "",
                 ))
-    else:
-        # Graceful degradation: warn but continue without additional package metadata
-        top = str(getattr(metadata_info, "target_under_license", ""))
+    if not had_other_metadata:
+        # Graceful degradation: warn but continue without additional package metadata.
+        # Pick the best possible label to identify which target this is about.
+        top_candidates = []
+        if _has(metadata_info, "target_under_license"):
+            top_candidates.append(metadata_info.target_under_license)
+        if _has(metadata_info, "top_level_target"):
+            top_candidates.append(metadata_info.top_level_target)
+        if fallback_top_label:
+            top_candidates.append(fallback_top_label)
+        # As a last resort, try to use the first dep's label for context.
+        deps_list = _safe_to_list(metadata_info.deps)
+        if not top_candidates and deps_list:
+            top_candidates.append(deps_list[0].target_under_license)
+        top = ""
+        for c in top_candidates:
+            sc = str(c).strip()
+            if sc:
+                top = _strip_null_repo(sc)
+                break
         print("WARNING: rules_license: TransitiveMetadataInfo for %s has no 'other_metadata'; continuing without it." % top)
 
+    # Choose a robust top label for this record
+    _top_label = ""
+    if _has(metadata_info, "target_under_license"):
+        _top_label = _strip_null_repo(metadata_info.target_under_license)
+    elif _has(metadata_info, "top_level_target"):
+        _top_label = _strip_null_repo(metadata_info.top_level_target)
+    elif fallback_top_label:
+        _top_label = fallback_top_label
+
     return [main_template.format(
-        top_level_target = _strip_null_repo(metadata_info.target_under_license),
+        top_level_target = _top_label,
         dependencies = ",".join(all_deps),
         licenses = ",".join(all_licenses),
         packages = ",".join(all_packages),
