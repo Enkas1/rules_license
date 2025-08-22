@@ -29,6 +29,21 @@ load(
 )
 load("@rules_license//rules_gathering:trace.bzl", "TraceInfo")
 
+def _safe_to_list(x):
+    """Return [] for None; list for depset/list; [x] otherwise."""
+    if x == None:
+        return []
+    t = type(x)
+    if t == "depset":
+        return x.to_list()
+    if t == "list":
+        return x
+    return [x]
+
+def _has(obj, name):
+    """Provider-safe hasattr wrapper."""
+    return hasattr(obj, name)
+
 def _strip_null_repo(label):
     """Removes the null repo name (e.g. @//) from a string.
 
@@ -154,6 +169,9 @@ def write_metadata_info(ctx, deps, json_out):
     for dep in deps:
         if TransitiveMetadataInfo in dep:
             licenses.extend(metadata_info_to_json(dep[TransitiveMetadataInfo]))
+        else:
+            # Warn but continue if the aspect didn't attach.
+            print("WARNING: rules_license: No TransitiveMetadataInfo on %s; skipping." % dep)
     ctx.actions.write(
         output = json_out,
         content = "[\n%s\n]\n" % ",\n".join(licenses),
@@ -221,7 +239,7 @@ def metadata_info_to_json(metadata_info):
 
     # Build reverse map of license to user
     used_by = {}
-    for dep in metadata_info.deps.to_list():
+    for dep in _safe_to_list(metadata_info.deps):
         # Undo the concatenation applied when stored in the provider.
         dep_licenses = dep.licenses.split(",")
         for license in dep_licenses:
@@ -230,7 +248,7 @@ def metadata_info_to_json(metadata_info):
             used_by[license].append(_strip_null_repo(dep.target_under_license))
 
     all_licenses = []
-    for license in sorted(metadata_info.licenses.to_list(), key = lambda x: x.label):
+    for license in sorted(_safe_to_list(metadata_info.licenses), key = lambda x: x.label):
         kinds = []
         for kind in sorted(license.license_kinds, key = lambda x: x.name):
             kinds.append(kind_template.format(
@@ -241,7 +259,9 @@ def metadata_info_to_json(metadata_info):
 
         if license.license_text:
             # Special handling for synthetic LicenseInfo
-            text_path = (license.license_text.package + "/" + license.license_text.name if type(license.license_text) == "Label" else license.license_text.path)
+            text_path = (license.license_text.package + "/" + license.license_text.name
+                         if type(license.license_text) == "Label"
+                         else license.license_text.path)
             all_licenses.append(license_template.format(
                 copyright_notice = license.copyright_notice,
                 kinds = ",".join(kinds),
@@ -251,11 +271,11 @@ def metadata_info_to_json(metadata_info):
                 package_version = license.package_version,
                 label = _strip_null_repo(license.label),
                 bazel_package =  _bazel_package(license.label),
-                used_by = ",\n          ".join(sorted(['"%s"' % x for x in used_by[str(license.label)]])),
+                used_by = ",\n          ".join(sorted(['"%s"' % x for x in used_by.get(str(license.label), [])])),
             ))
 
     all_deps = []
-    for dep in sorted(metadata_info.deps.to_list(), key = lambda x: x.target_under_license):
+    for dep in sorted(_safe_to_list(metadata_info.deps), key = lambda x: x.target_under_license):
         # Undo the concatenation applied when stored in the provider.
         dep_licenses = dep.licenses.split(",")
         all_deps.append(dep_template.format(
@@ -264,41 +284,48 @@ def metadata_info_to_json(metadata_info):
         ))
 
     all_packages = []
-    # We would use this if we had distinct depsets for every provider type.
-    #for package in sorted(metadata_info.package_info.to_list(), key = lambda x: x.label):
-    #    all_packages.append(package_info_template.format(
-    #        label = _strip_null_repo(package.label),
-    #        package_name = package.package_name,
-    #        package_url = package.package_url,
-    #        package_version = package.package_version,
-    #    ))
 
-    for mi in sorted(metadata_info.other_metadata.to_list(), key = lambda x: x.label):
-        # Maybe use a map of provider class to formatter.  A generic dict->json function
-        # in starlark would help
+    # Prefer explicit PackageInfo provider if present
+    if _has(metadata_info, "package_info") and metadata_info.package_info != None:
+        for package in sorted(_safe_to_list(metadata_info.package_info), key = lambda x: str(getattr(x, "label", ""))):
+            all_packages.append(package_info_template.format(
+                label = _strip_null_repo(package.label),
+                bazel_package =  _bazel_package(package.label),
+                package_name = package.package_name,
+                package_url = package.package_url,
+                package_version = package.package_version,
+                purl = getattr(package, "purl", ""),
+            ))
 
-        # This format is for using distinct providers.  I like the compile time safety.
-        if mi.type == "package_info":
-            all_packages.append(package_info_template.format(
-                label = _strip_null_repo(mi.label),
-                bazel_package =  _bazel_package(mi.label),
-                package_name = mi.package_name,
-                package_url = mi.package_url,
-                package_version = mi.package_version,
-                purl = mi.purl,
-            ))
-        # experimental: Support the ExperimentalMetadataInfo bag of data
-        # WARNING: Do not depend on this. It will change without notice.
-        if mi.type == "package_info_alt":
-            all_packages.append(package_info_template.format(
-                label = _strip_null_repo(mi.label),
-                bazel_package =  _bazel_package(mi.label),
-                # data is just a bag, so we need to use get() or ""
-                package_name = mi.data.get("package_name") or "",
-                package_url = mi.data.get("package_url") or "",
-                package_version = mi.data.get("package_version") or "",
-                purl = mi.data.get("purl") or "",
-            ))
+    # Back-compat / alt source: ExperimentalMetadataInfo bag under other_metadata
+    if _has(metadata_info, "other_metadata") and metadata_info.other_metadata != None:
+        for mi in sorted(_safe_to_list(metadata_info.other_metadata), key = lambda x: str(getattr(x, "label", ""))):
+            # This format is for using distinct providers.  I like the compile time safety.
+            if hasattr(mi, "type") and mi.type == "package_info":
+                all_packages.append(package_info_template.format(
+                    label = _strip_null_repo(mi.label),
+                    bazel_package =  _bazel_package(mi.label),
+                    package_name = mi.package_name,
+                    package_url = mi.package_url,
+                    package_version = mi.package_version,
+                    purl = mi.purl,
+                ))
+            # experimental: Support the ExperimentalMetadataInfo bag of data
+            # WARNING: Do not depend on this. It will change without notice.
+            if hasattr(mi, "type") and mi.type == "package_info_alt":
+                all_packages.append(package_info_template.format(
+                    label = _strip_null_repo(mi.label),
+                    bazel_package =  _bazel_package(mi.label),
+                    # data is just a bag, so we need to use get() or ""
+                    package_name = mi.data.get("package_name") or "",
+                    package_url = mi.data.get("package_url") or "",
+                    package_version = mi.data.get("package_version") or "",
+                    purl = mi.data.get("purl") or "",
+                ))
+    else:
+        # Graceful degradation: warn but continue without additional package metadata
+        top = str(getattr(metadata_info, "target_under_license", ""))
+        print("WARNING: rules_license: TransitiveMetadataInfo for %s has no 'other_metadata'; continuing without it." % top)
 
     return [main_template.format(
         top_level_target = _strip_null_repo(metadata_info.target_under_license),
