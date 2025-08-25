@@ -45,6 +45,13 @@ def _bazel_package(label):
     clean_label = _strip_null_repo(label)
     return clean_label[0:-(len(label.name) + 1)]
 
+def _best_label(mi, fallback = ""):
+    if hasattr(mi, "target_under_license"):
+        return _strip_null_repo(mi.target_under_license)
+    if hasattr(mi, "top_level_target"):
+        return _strip_null_repo(mi.top_level_target)
+    return fallback
+
 def _gather_metadata_info_impl(target, ctx):
     return gather_metadata_info_common(
         target,
@@ -86,7 +93,7 @@ def _write_metadata_info_impl(target, ctx):
 
     # Write the output file for the target
     name = "%s_metadata_info.json" % ctx.label.name
-    content = "[\n%s\n]\n" % ",\n".join(metadata_info_to_json(info))
+    content = "[\n%s\n]\n" % ",\n".join(metadata_info_to_json(info, _strip_null_repo(target.label)))
     out = ctx.actions.declare_file(name)
     ctx.actions.write(
         output = out,
@@ -153,13 +160,13 @@ def write_metadata_info(ctx, deps, json_out):
     licenses = []
     for dep in deps:
         if TransitiveMetadataInfo in dep:
-            licenses.extend(metadata_info_to_json(dep[TransitiveMetadataInfo]))
+            licenses.extend(metadata_info_to_json(dep[TransitiveMetadataInfo], _strip_null_repo(dep.label)))
     ctx.actions.write(
         output = json_out,
         content = "[\n%s\n]\n" % ",\n".join(licenses),
     )
 
-def metadata_info_to_json(metadata_info):
+def metadata_info_to_json(metadata_info, fallback_top_label = ""):
     """Render a single LicenseInfo provider to JSON
 
     Args:
@@ -303,10 +310,10 @@ def metadata_info_to_json(metadata_info):
                 ))
     else:
         print("WARNING: rules_license: TransitiveMetadataInfo for %s has no 'other_metadata'; continuing without it."
-              % _strip_null_repo(metadata_info.target_under_license))
+              % _best_label(metadata_info, fallback_top_label))
 
     return [main_template.format(
-        top_level_target = _strip_null_repo(metadata_info.target_under_license),
+        top_level_target = _best_label(metadata_info, fallback_top_label),
         dependencies = ",".join(all_deps),
         licenses = ",".join(all_licenses),
         packages = ",".join(all_packages),
