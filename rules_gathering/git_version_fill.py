@@ -7,6 +7,7 @@
 
 import json, os, re, subprocess, sys
 from pathlib import Path
+from __future__ import annotations
 
 NOASSERTION = "NOASSERTION"
 
