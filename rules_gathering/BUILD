@@ -31,3 +31,8 @@ exports_files(
     ]),
     visibility = ["//doc_build:__pkg__"],
 )
+py_binary(
+    name = "git_version_fill",
+    srcs = ["git_version_fill.py"],
+    visibility = ["//visibility:public"],
+)

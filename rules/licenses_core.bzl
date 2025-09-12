@@ -163,8 +163,8 @@ def gather_metadata_info_common(target, ctx, provider_factory, metadata_provider
 
     _get_transitive_metadata(ctx, trans_licenses, trans_other_metadata, trans_package_info, trans_deps, traces, provider_factory, filter_func)
 
-    #if not licenses and not trans_licenses:
-    #    return [provider_factory(deps = depset(), licenses = depset(), traces = [])]
+    if not licenses and not trans_licenses:
+        return [provider_factory(deps = depset(), licenses = depset(), traces = [])]
 
     # If this is the target, start the sequence of traces.
     if ctx.attr._trace[TraceInfo].trace and ctx.attr._trace[TraceInfo].trace in str(ctx.label):
